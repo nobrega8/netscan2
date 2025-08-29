@@ -165,12 +165,20 @@ enum NetUtils {
         sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         sa.sin_family = sa_family_t(AF_INET)
         inet_pton(AF_INET, ip, &sa.sin_addr)
+
         var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-        let res = getnameinfo(UnsafePointer<sockaddr>(OpaquePointer(&sa)),
-                              socklen_t(sa.sin_len),
-                              &hostBuffer, socklen_t(hostBuffer.count),
-                              nil, 0, NI_NAMEREQD)
-        if res == 0 {
+
+        let result: Int32 = withUnsafePointer(to: &sa) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { ptr in
+                getnameinfo(ptr,
+                            socklen_t(MemoryLayout<sockaddr_in>.size),
+                            &hostBuffer,
+                            socklen_t(hostBuffer.count),
+                            nil, 0, NI_NAMEREQD)
+            }
+        }
+
+        if result == 0 {
             return String(cString: hostBuffer)
         }
         return nil
@@ -280,7 +288,7 @@ final class NetworkScanner: ObservableObject {
                 }
             }
             // Ordena por IP
-            found.sort { ipToSortable($0.ip) < ipToSortable($1.ip) }
+            found.sort { ipLess($0.ip, $1.ip) }
             await self.applyResults(found)
             await self.finishScan(withStatus: "Concluído: \(found.count) dispositivos")
         }
@@ -313,6 +321,18 @@ func subnetLabel(ip: String, cidr: Int) -> String {
 }
 func ipToSortable(_ ip: String) -> [Int] {
     ip.split(separator: ".").compactMap { Int($0) }
+}
+
+func ipLess(_ a: String, _ b: String) -> Bool {
+    let aa = ipToSortable(a)
+    let bb = ipToSortable(b)
+    let n = max(aa.count, bb.count)
+    for i in 0..<n {
+        let av = i < aa.count ? aa[i] : 0
+        let bv = i < bb.count ? bb[i] : 0
+        if av != bv { return av < bv }
+    }
+    return false
 }
 
 // MARK: - Views

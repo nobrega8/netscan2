@@ -35,16 +35,6 @@
 			path = netscan2;
 			sourceTree = "<group>";
 		};
-		0C4E4E312E622D03004C9451 /* netscan2Tests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = netscan2Tests;
-			sourceTree = "<group>";
-		};
-		0C4E4E3B2E622D03004C9451 /* netscan2UITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = netscan2UITests;
-			sourceTree = "<group>";
-		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -76,8 +66,6 @@
 			isa = PBXGroup;
 			children = (
 				0C4E4E222E622D02004C9451 /* netscan2 */,
-				0C4E4E312E622D03004C9451 /* netscan2Tests */,
-				0C4E4E3B2E622D03004C9451 /* netscan2UITests */,
 				0C4E4E212E622D02004C9451 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -130,9 +118,6 @@
 			dependencies = (
 				0C4E4E302E622D03004C9451 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				0C4E4E312E622D03004C9451 /* netscan2Tests */,
-			);
 			name = netscan2Tests;
 			packageProductDependencies = (
 			);
@@ -152,9 +137,6 @@
 			);
 			dependencies = (
 				0C4E4E3A2E622D03004C9451 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				0C4E4E3B2E622D03004C9451 /* netscan2UITests */,
 			);
 			name = netscan2UITests;
 			packageProductDependencies = (
