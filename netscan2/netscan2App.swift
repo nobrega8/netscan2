@@ -2,6 +2,7 @@ import SwiftUI
 import Network
 import SystemConfiguration
 import CoreWLAN
+import UniformTypeIdentifiers
 
 // MARK: - Models
 
@@ -982,6 +983,7 @@ struct DeviceRow: View {
                 .frame(width: 48, height: 48)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+                .help(device.mac != nil ? "Clique com botão direito para carregar imagem personalizada ou arraste uma imagem PNG" : "Dispositivo sem MAC")
             
             // Hostname / IP
             VStack(alignment: .leading, spacing: 2) {
@@ -1072,6 +1074,9 @@ struct DeviceRow: View {
                 Button("Editar", action: onEdit)
             }
             if device.mac != nil {
+                Button("Carregar imagem...") {
+                    loadCustomIcon()
+                }
                 Button("Remover ícone personalizado", action: onClearIcon)
             }
         }
@@ -1094,6 +1099,22 @@ struct DeviceRow: View {
             Text(device.iconEmoji)
                 .font(.system(size: 24))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+    
+    private func loadCustomIcon() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.png]
+        panel.title = "Selecionar imagem PNG"
+        panel.prompt = "Escolher"
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                onDropPNG(url)
+            }
         }
     }
 }
