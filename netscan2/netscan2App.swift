@@ -36,6 +36,7 @@ struct Device: Identifiable, Codable, Hashable {
     var owner: String // Dono - editable by user
     var brand: String // Marca - auto-filled via OUI, editable
     var model: String // Modelo - editable by user
+    var status: String // Status - online/offline
     var lastSeen: Date
     
     init(ip: String, mac: String?, hostname: String?, customIconPath: String? = nil) {
@@ -46,6 +47,7 @@ struct Device: Identifiable, Codable, Hashable {
         self.owner = ""
         self.brand = ""
         self.model = ""
+        self.status = "online" // Default to online when first discovered
         self.lastSeen = Date()
     }
     
@@ -77,6 +79,9 @@ struct Device: Identifiable, Codable, Hashable {
         
         // Preserve manually set brand, otherwise use detected brand
         updated.brand = self.brand.isEmpty ? brand : self.brand
+        
+        // Update status to online since device was found in scan
+        updated.status = "online"
         
         // Preserve custom icon if not provided in scan
         if customIconPath == nil {
@@ -183,6 +188,43 @@ final class OUIManager {
         
         return ouiDict[oui]
     }
+    
+    func addCustomOUI(mac: String, brand: String) {
+        guard !mac.isEmpty && !brand.isEmpty else { return }
+        
+        let cleanMAC = mac.uppercased().replacingOccurrences(of: "-", with: ":")
+        let oui = String(cleanMAC.prefix(8))
+        
+        // Don't add if already in common OUIs or if brand hasn't changed
+        if commonOUIs[oui] == brand { return }
+        
+        let fm = FileManager.default
+        guard let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let netScanDir = appSupportDir.appendingPathComponent("NetScan", isDirectory: true)
+        let ouiFile = netScanDir.appendingPathComponent("oui.json")
+        
+        // Create directory if it doesn't exist
+        try? fm.createDirectory(at: netScanDir, withIntermediateDirectories: true)
+        
+        // Load existing data
+        var ouiDict: [String: String] = [:]
+        if let data = try? Data(contentsOf: ouiFile) {
+            ouiDict = (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+        }
+        
+        // Add new mapping
+        ouiDict[oui] = brand
+        
+        // Save back to file
+        do {
+            let data = try JSONEncoder().encode(ouiDict)
+            try data.write(to: ouiFile, options: .atomic)
+        } catch {
+            print("Failed to save custom OUI: \(error)")
+        }
+    }
 }
 
 // MARK: - Network Manager (for Network Persistence)
@@ -235,6 +277,10 @@ final class NetworkManager: ObservableObject {
         }
     }
     
+    public func save() {
+        saveNetworks()
+    }
+    
     func getCurrentSSID() -> String? {
         // Get current Wi-Fi network SSID using CoreWLAN framework
         do {
@@ -260,6 +306,18 @@ final class NetworkManager: ObservableObject {
         if let index = networks.firstIndex(where: { $0.ssid == ssid }) {
             // Update existing network
             var network = networks[index]
+            
+            // Get MACs from current scan
+            let currentScanMACs = Set(devices.compactMap { $0.mac })
+            
+            // Mark devices not found in current scan as offline
+            for (mac, existingDevice) in network.devices {
+                if !currentScanMACs.contains(mac) {
+                    var offlineDevice = existingDevice
+                    offlineDevice.status = "offline"
+                    network.devices[mac] = offlineDevice
+                }
+            }
             
             // Merge devices - existing devices keep user data, new devices get auto-detected data
             for device in devices {
@@ -659,23 +717,34 @@ final class NetworkScanner: ObservableObject {
     
     private func saveToNetwork(devices: [Device]) async {
         // Get current SSID and save devices to that network
-        let ssid = networkManager.getCurrentSSID() ?? generateUnknownNetworkName()
+        let ssid = networkManager.getCurrentSSID() ?? getOrCreateUnknownNetworkName()
         await MainActor.run {
             networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
         }
     }
     
-    private func generateUnknownNetworkName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd/MM HH:mm"
-        let timestamp = formatter.string(from: Date())
-        
-        // Try to get interface name
+    private func getOrCreateUnknownNetworkName() -> String {
+        // Check if there's already an unknown network for this interface
+        let networkManager = self.networkManager
         if let iface = NetUtils.getPrimaryIPv4() {
-            return "Rede Desconhecida (\(iface.ip) - \(timestamp))"
+            let interfaceBasedName = "Rede Desconhecida (\(iface.ip))"
+            
+            // Look for existing unknown network with same interface
+            if networkManager.networks.contains(where: { network in
+                network.ssid.hasPrefix("Rede Desconhecida") && network.ssid.contains(iface.ip)
+            }) {
+                return interfaceBasedName
+            }
+            
+            return interfaceBasedName
         }
         
-        return "Rede Desconhecida (\(timestamp))"
+        // Fallback: look for any unknown network or create a simple one
+        if networkManager.networks.contains(where: { $0.ssid == "Rede Desconhecida" }) {
+            return "Rede Desconhecida"
+        }
+        
+        return "Rede Desconhecida"
     }
     
     func stopScan() {
@@ -728,6 +797,8 @@ struct ContentView: View {
     @State private var showOnlyWithMAC = false
     @State private var editingNetworkId: UUID? = nil
     @State private var editingDeviceId: UUID? = nil
+    @State private var selectedDeviceIds: Set<UUID> = []
+    @State private var showMergeConfirmation = false
     
     var filtered: [Device] {
         let devices = networkManager.getDevicesForSelectedNetwork()
@@ -828,6 +899,25 @@ struct ContentView: View {
                 .frame(maxWidth: 320)
             Toggle("Só com MAC", isOn: $showOnlyWithMAC)
                 .toggleStyle(.switch)
+            
+            // Selection controls
+            if !selectedDeviceIds.isEmpty {
+                Text("\(selectedDeviceIds.count) selecionados")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                Button("Limpar") {
+                    selectedDeviceIds.removeAll()
+                }
+                .buttonStyle(.borderless)
+                
+                Button("Merge") {
+                    showMergeConfirmation = true
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedDeviceIds.count < 2)
+            }
+            
             Spacer()
             Button {
                 scanner.startScan()
@@ -843,17 +933,33 @@ struct ContentView: View {
             .disabled(!scanner.isScanning)
         }
         .padding()
+        .alert("Merge Dispositivos", isPresented: $showMergeConfirmation) {
+            Button("Cancelar", role: .cancel) { }
+            Button("Merge", role: .destructive) {
+                mergeSelectedDevices()
+            }
+        } message: {
+            Text("Deseja fazer merge dos \(selectedDeviceIds.count) dispositivos selecionados? O primeiro dispositivo será mantido e os outros removidos.")
+        }
     }
     
     private var devicesList: some View {
-        List {
+        List(selection: $selectedDeviceIds) {
             Section(header: devicesHeaderRow) {
                 ForEach(filtered) { device in
                     DeviceRow(
                         device: device,
                         isEditing: editingDeviceId == device.id,
+                        isSelected: selectedDeviceIds.contains(device.id),
                         onEdit: { editingDeviceId = device.id },
                         onSave: { updatedDevice in
+                            // Save custom OUI if brand was manually edited
+                            if !updatedDevice.brand.isEmpty,
+                               let mac = updatedDevice.mac,
+                               updatedDevice.brand != device.brand {
+                                OUIManager.shared.addCustomOUI(mac: mac, brand: updatedDevice.brand)
+                            }
+                            
                             if let networkId = networkManager.selectedNetworkId {
                                 networkManager.updateDevice(updatedDevice, in: networkId)
                             }
@@ -873,6 +979,7 @@ struct ContentView: View {
                             }
                         }
                     )
+                    .tag(device.id)
                 }
             }
         }
@@ -904,6 +1011,7 @@ struct ContentView: View {
             Text("Dono").frame(width: 100, alignment: .leading)
             Text("Marca").frame(width: 80, alignment: .leading)
             Text("Modelo").frame(width: 100, alignment: .leading)
+            Text("Status").frame(width: 60, alignment: .leading)
         }
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -924,10 +1032,33 @@ struct ContentView: View {
         }
     }
     
+    private func mergeSelectedDevices() {
+        guard selectedDeviceIds.count >= 2,
+              let networkId = networkManager.selectedNetworkId,
+              let networkIndex = networkManager.networks.firstIndex(where: { $0.id == networkId }) else {
+            return
+        }
+        
+        let devicesToMerge = filtered.filter { selectedDeviceIds.contains($0.id) }
+        guard let primaryDevice = devicesToMerge.first else { return }
+        
+        // Remove all devices except the primary one
+        var network = networkManager.networks[networkIndex]
+        for device in devicesToMerge.dropFirst() {
+            if let mac = device.mac {
+                network.devices.removeValue(forKey: mac)
+            }
+        }
+        
+        networkManager.networks[networkIndex] = network
+        networkManager.save()
+        selectedDeviceIds.removeAll()
+    }
+    
     private func exportCSV(devices: [Device]) {
-        let header = "ip,mac,hostname,owner,brand,model\n"
+        let header = "ip,mac,hostname,owner,brand,model,status\n"
         let rows = devices.map { 
-            "\"\($0.ip)\",\"\($0.mac ?? "")\",\"\($0.hostname ?? "")\",\"\($0.owner)\",\"\($0.brand)\",\"\($0.model)\"" 
+            "\"\($0.ip)\",\"\($0.mac ?? "")\",\"\($0.hostname ?? "")\",\"\($0.owner)\",\"\($0.brand)\",\"\($0.model)\",\"\($0.status)\"" 
         }.joined(separator: "\n")
         let csv = header + rows + "\n"
         let panel = NSSavePanel()
@@ -1003,6 +1134,7 @@ struct NetworkRow: View {
 struct DeviceRow: View {
     let device: Device
     let isEditing: Bool
+    let isSelected: Bool
     var onEdit: () -> Void
     var onSave: (Device) -> Void
     var onCancel: () -> Void
@@ -1011,9 +1143,10 @@ struct DeviceRow: View {
     
     @State private var editedDevice: Device
     
-    init(device: Device, isEditing: Bool, onEdit: @escaping () -> Void, onSave: @escaping (Device) -> Void, onCancel: @escaping () -> Void, onDropPNG: @escaping (URL) -> Void, onClearIcon: @escaping () -> Void) {
+    init(device: Device, isEditing: Bool, isSelected: Bool = false, onEdit: @escaping () -> Void, onSave: @escaping (Device) -> Void, onCancel: @escaping () -> Void, onDropPNG: @escaping (URL) -> Void, onClearIcon: @escaping () -> Void) {
         self.device = device
         self.isEditing = isEditing
+        self.isSelected = isSelected
         self.onEdit = onEdit
         self.onSave = onSave
         self.onCancel = onCancel
@@ -1086,6 +1219,17 @@ struct DeviceRow: View {
                     .frame(width: 100, alignment: .leading)
                     .onTapGesture { onEdit() }
             }
+            
+            // Status (online/offline)
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(device.status == "online" ? .green : .red)
+                    .frame(width: 8, height: 8)
+                Text(device.status)
+                    .font(.caption)
+                    .foregroundStyle(device.status == "online" ? .green : .red)
+            }
+            .frame(width: 60, alignment: .leading)
             
             // Edit buttons
             if isEditing {
