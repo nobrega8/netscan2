@@ -303,6 +303,18 @@ final class NetworkManager: ObservableObject {
         }
     }
     
+    func deleteNetwork(_ networkId: UUID) {
+        // Remove the network from the list
+        networks.removeAll { $0.id == networkId }
+        
+        // If the deleted network was selected, clear selection or select another
+        if selectedNetworkId == networkId {
+            selectedNetworkId = networks.first?.id
+        }
+        
+        saveNetworks()
+    }
+    
     func updateDevice(_ device: Device, in networkId: UUID) {
         guard let networkIndex = networks.firstIndex(where: { $0.id == networkId }),
               let mac = device.mac else { return }
@@ -647,10 +659,23 @@ final class NetworkScanner: ObservableObject {
     
     private func saveToNetwork(devices: [Device]) async {
         // Get current SSID and save devices to that network
-        let ssid = networkManager.getCurrentSSID() ?? "Desconhecida"
+        let ssid = networkManager.getCurrentSSID() ?? generateUnknownNetworkName()
         await MainActor.run {
             networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
         }
+    }
+    
+    private func generateUnknownNetworkName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd/MM HH:mm"
+        let timestamp = formatter.string(from: Date())
+        
+        // Try to get interface name
+        if let iface = NetUtils.getPrimaryIPv4() {
+            return "Rede Desconhecida (\(iface.ip) - \(timestamp))"
+        }
+        
+        return "Rede Desconhecida (\(timestamp))"
     }
     
     func stopScan() {
@@ -762,9 +787,15 @@ struct ContentView: View {
             
             // Networks list
             List(networkManager.networks, selection: $networkManager.selectedNetworkId) { network in
-                NetworkRow(network: network) { emoji in
-                    networkManager.updateNetworkEmoji(network.id, emoji: emoji)
-                }
+                NetworkRow(
+                    network: network,
+                    onEmojiUpdate: { emoji in
+                        networkManager.updateNetworkEmoji(network.id, emoji: emoji)
+                    },
+                    onDelete: {
+                        networkManager.deleteNetwork(network.id)
+                    }
+                )
             }
             .listStyle(.sidebar)
             
@@ -913,8 +944,10 @@ struct ContentView: View {
 struct NetworkRow: View {
     let network: WiFiNetwork
     var onEmojiUpdate: (String) -> Void
+    var onDelete: () -> Void
     @State private var isEditingEmoji = false
     @State private var newEmoji = ""
+    @State private var showDeleteConfirmation = false
     
     var body: some View {
         HStack(spacing: 8) {
@@ -951,6 +984,19 @@ struct NetworkRow: View {
             Spacer()
         }
         .contentShape(Rectangle())
+        .contextMenu {
+            Button("Apagar Rede", role: .destructive) {
+                showDeleteConfirmation = true
+            }
+        }
+        .alert("Apagar Rede", isPresented: $showDeleteConfirmation) {
+            Button("Cancelar", role: .cancel) { }
+            Button("Apagar", role: .destructive) {
+                onDelete()
+            }
+        } message: {
+            Text("Tem certeza que deseja apagar a rede \"\(network.ssid)\"? Esta ação não pode ser desfeita.")
+        }
     }
 }
 
