@@ -41,6 +41,26 @@ A SwiftUI network scanner for macOS with Wi-Fi network persistence and enhanced 
 4. **Customize Icons**: Drag PNG files onto device rows for custom icons
 5. **Network Emojis**: Click network emoji in sidebar to customize
 
+## Installation
+
+### Running from Source
+1. Clone this repository
+2. Open `netscan2.xcodeproj` in Xcode
+3. Build and run the project (⌘+R)
+4. Grant network permissions when prompted
+
+### Distribution Build
+For distribution outside the Mac App Store:
+1. Archive the project in Xcode (Product → Archive)
+2. Export as "Developer ID" signed application
+3. Distribute the `.app` bundle to users
+4. Users may need to allow the app in System Preferences → Security & Privacy
+
+### First Launch
+- The app will request permission to access network information
+- On first scan, it will automatically detect your current Wi-Fi network
+- Device data is stored locally in `~/Library/Application Support/NetScan/`
+
 ## Data Storage
 
 ### Networks File (`networks.json`)
@@ -91,3 +111,39 @@ Export includes all device fields:
 - macOS 12.0 or later
 - SwiftUI framework
 - CoreWLAN framework (for SSID detection)
+
+## Known Limitations
+
+- **Network Permissions**: The app requires network permissions to perform ping and ARP operations for device discovery
+- **Sandboxed Environment**: When running in App Store sandbox mode, some network operations may be restricted
+- **Root Privileges**: Advanced network scanning features may require elevated permissions for optimal performance
+- **Network Types**: Best performance on Wi-Fi networks; Ethernet connections are supported but appear as "Desconhecida" (Unknown)
+
+## Roadmap
+
+Future features planned for upcoming releases:
+
+### 🔍 Enhanced Filtering & Search
+- Advanced device filtering by type, brand, or status
+- Search across multiple networks simultaneously
+- Custom device grouping and tagging
+
+### 📊 Export & Reporting  
+- Multiple export formats (CSV, JSON, XML)
+- Network topology visualization
+- Device history and change tracking
+
+### 🔔 Notifications & Monitoring
+- Real-time device connect/disconnect notifications
+- Scheduled automatic scans
+- Security alerts for new unknown devices
+
+### 🛡️ Security Features
+- Device security assessment
+- Port scanning capabilities
+- Network vulnerability detection
+
+### 🎨 UI/UX Improvements
+- Dark mode support refinements
+- Customizable device view layouts
+- Network map visualization

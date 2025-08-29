@@ -2,6 +2,7 @@ import SwiftUI
 import Network
 import SystemConfiguration
 import CoreWLAN
+import UniformTypeIdentifiers
 
 // MARK: - Models
 
@@ -66,22 +67,23 @@ struct Device: Identifiable, Codable, Hashable {
         return "🖥️"
     }
     
-    // Update device with new scan data while preserving user fields
-    mutating func updateFromScan(ip: String, hostname: String?, customIconPath: String?, brand: String) {
-        // Update automatically detected fields only if they changed
-        if self.hostname != hostname {
-            // Hostname changed, update it  
-        }
-        if let newIconPath = customIconPath {
-            self.customIconPath = newIconPath
+    // Create updated device with new scan data while preserving user fields
+    func updatedFromScan(ip: String, hostname: String?, customIconPath: String?, brand: String) -> Device {
+        var updated = Device(ip: ip, mac: self.mac, hostname: hostname, customIconPath: customIconPath)
+        
+        // Preserve user-editable fields
+        updated.owner = self.owner
+        updated.model = self.model
+        
+        // Preserve manually set brand, otherwise use detected brand
+        updated.brand = self.brand.isEmpty ? brand : self.brand
+        
+        // Preserve custom icon if not provided in scan
+        if customIconPath == nil {
+            updated.customIconPath = self.customIconPath
         }
         
-        // Auto-fill brand only if not manually set (empty) and we have a brand to set
-        if self.brand.isEmpty && !brand.isEmpty {
-            self.brand = brand
-        }
-        
-        self.lastSeen = Date()
+        return updated
     }
 }
 
@@ -168,7 +170,9 @@ final class OUIManager {
     private func lookupUserOUI(oui: String) -> String? {
         // Try to load user-provided oui.json file
         let fm = FileManager.default
-        let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
         let netScanDir = appSupportDir.appendingPathComponent("NetScan", isDirectory: true)
         let ouiFile = netScanDir.appendingPathComponent("oui.json")
         
@@ -196,7 +200,9 @@ final class NetworkManager: ObservableObject {
     }
     
     private var appSupportDir: URL {
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Unable to access Application Support directory")
+        }
         let dir = base.appendingPathComponent("NetScan", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -233,12 +239,20 @@ final class NetworkManager: ObservableObject {
         // Get current Wi-Fi network SSID using CoreWLAN framework
         do {
             guard let wifiInterface = CWWiFiClient.shared().interface() else {
+                // No Wi-Fi interface available (e.g., using Ethernet)
                 return nil
             }
-            return wifiInterface.ssid()
+            
+            guard let ssid = wifiInterface.ssid(), !ssid.isEmpty else {
+                // Wi-Fi interface exists but not connected to a network
+                return nil
+            }
+            
+            return ssid
         } catch {
-            // If CoreWLAN fails, return a fallback name
-            return "Current Network"
+            // If CoreWLAN fails, return nil to indicate unknown network
+            print("Failed to get Wi-Fi SSID: \(error)")
+            return nil
         }
     }
     
@@ -251,9 +265,8 @@ final class NetworkManager: ObservableObject {
             for device in devices {
                 if let mac = device.mac {
                     if let existingDevice = network.devices[mac] {
-                        // Update existing device while preserving user fields
-                        var updatedDevice = existingDevice
-                        updatedDevice.updateFromScan(
+                        // Create updated device while preserving user fields
+                        let updatedDevice = existingDevice.updatedFromScan(
                             ip: device.ip,
                             hostname: device.hostname,
                             customIconPath: device.customIconPath,
@@ -319,7 +332,9 @@ final class IconManager {
     private init() {}
     
     private var appSupportDir: URL {
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Unable to access Application Support directory")
+        }
         let dir = base.appendingPathComponent("NetScan", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -632,7 +647,7 @@ final class NetworkScanner: ObservableObject {
     
     private func saveToNetwork(devices: [Device]) async {
         // Get current SSID and save devices to that network
-        let ssid = networkManager.getCurrentSSID() ?? "Unknown Network"
+        let ssid = networkManager.getCurrentSSID() ?? "Desconhecida"
         await MainActor.run {
             networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
         }
@@ -968,6 +983,7 @@ struct DeviceRow: View {
                 .frame(width: 48, height: 48)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+                .help(device.mac != nil ? "Clique com botão direito para carregar imagem personalizada ou arraste uma imagem PNG" : "Dispositivo sem MAC")
             
             // Hostname / IP
             VStack(alignment: .leading, spacing: 2) {
@@ -1058,6 +1074,9 @@ struct DeviceRow: View {
                 Button("Editar", action: onEdit)
             }
             if device.mac != nil {
+                Button("Carregar imagem...") {
+                    loadCustomIcon()
+                }
                 Button("Remover ícone personalizado", action: onClearIcon)
             }
         }
@@ -1080,6 +1099,22 @@ struct DeviceRow: View {
             Text(device.iconEmoji)
                 .font(.system(size: 24))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+    
+    private func loadCustomIcon() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.png]
+        panel.title = "Selecionar imagem PNG"
+        panel.prompt = "Escolher"
+        
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                onDropPNG(url)
+            }
         }
     }
 }
