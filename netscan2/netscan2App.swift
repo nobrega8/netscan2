@@ -169,7 +169,9 @@ final class OUIManager {
     private func lookupUserOUI(oui: String) -> String? {
         // Try to load user-provided oui.json file
         let fm = FileManager.default
-        let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
         let netScanDir = appSupportDir.appendingPathComponent("NetScan", isDirectory: true)
         let ouiFile = netScanDir.appendingPathComponent("oui.json")
         
@@ -197,7 +199,9 @@ final class NetworkManager: ObservableObject {
     }
     
     private var appSupportDir: URL {
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Unable to access Application Support directory")
+        }
         let dir = base.appendingPathComponent("NetScan", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -327,7 +331,9 @@ final class IconManager {
     private init() {}
     
     private var appSupportDir: URL {
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            fatalError("Unable to access Application Support directory")
+        }
         let dir = base.appendingPathComponent("NetScan", isDirectory: true)
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
