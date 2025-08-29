@@ -68,17 +68,16 @@ struct Device: Identifiable, Codable, Hashable {
     
     // Update device with new scan data while preserving user fields
     mutating func updateFromScan(ip: String, hostname: String?, customIconPath: String?, brand: String) {
-        // Update automatically detected fields
-        if self.ip != ip {
-            // IP changed, update it
-        }
+        // Update automatically detected fields only if they changed
         if self.hostname != hostname {
             // Hostname changed, update it  
         }
-        self.customIconPath = customIconPath
+        if let newIconPath = customIconPath {
+            self.customIconPath = newIconPath
+        }
         
-        // Auto-fill brand only if not manually set
-        if self.brand.isEmpty {
+        // Auto-fill brand only if not manually set (empty) and we have a brand to set
+        if self.brand.isEmpty && !brand.isEmpty {
             self.brand = brand
         }
         
@@ -210,26 +209,37 @@ final class NetworkManager: ObservableObject {
     }
     
     private func loadNetworks() {
-        guard let data = try? Data(contentsOf: networksURL),
-              let networks = try? JSONDecoder().decode([WiFiNetwork].self, from: data) else {
+        do {
+            let data = try Data(contentsOf: networksURL)
+            let networks = try JSONDecoder().decode([WiFiNetwork].self, from: data)
+            self.networks = networks
+        } catch {
+            // If loading fails, start with empty networks list
+            print("Failed to load networks: \(error.localizedDescription)")
             self.networks = []
-            return
         }
-        self.networks = networks
     }
     
     private func saveNetworks() {
-        if let data = try? JSONEncoder().encode(networks) {
-            try? data.write(to: networksURL, options: .atomic)
+        do {
+            let data = try JSONEncoder().encode(networks)
+            try data.write(to: networksURL, options: .atomic)
+        } catch {
+            print("Failed to save networks: \(error.localizedDescription)")
         }
     }
     
     func getCurrentSSID() -> String? {
         // Get current Wi-Fi network SSID using CoreWLAN framework
-        guard let wifiInterface = CWWiFiClient.shared().interface() else {
-            return nil
+        do {
+            guard let wifiInterface = CWWiFiClient.shared().interface() else {
+                return nil
+            }
+            return wifiInterface.ssid()
+        } catch {
+            // If CoreWLAN fails, return a fallback name
+            return "Current Network"
         }
-        return wifiInterface.ssid()
     }
     
     func addOrUpdateNetwork(ssid: String, devices: [Device]) {
@@ -621,10 +631,10 @@ final class NetworkScanner: ObservableObject {
     }
     
     private func saveToNetwork(devices: [Device]) async {
-        if let ssid = await networkManager.getCurrentSSID() {
-            await MainActor.run {
-                networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
-            }
+        // Get current SSID and save devices to that network
+        let ssid = networkManager.getCurrentSSID() ?? "Unknown Network"
+        await MainActor.run {
+            networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
         }
     }
     
@@ -696,6 +706,7 @@ struct ContentView: View {
             // Main content with devices
             if networkManager.selectedNetworkId != nil {
                 deviceListView
+                    .id(networkManager.selectedNetworkId) // Refresh when network changes
             } else {
                 VStack {
                     Text("Selecione uma rede")

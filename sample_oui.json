@@ -1,0 +1,53 @@
+{
+  "00:1B:63": "Apple",
+  "00:1F:F3": "Apple",
+  "00:25:00": "Apple",
+  "3C:15:C2": "Apple",
+  "AC:DE:48": "Apple",
+  "B8:E8:56": "Apple",
+  "DC:A6:32": "Apple",
+  "E4:CE:8F": "Apple",
+  "F0:18:98": "Apple",
+  "F4:0F:24": "Apple",
+  "F8:1E:DF": "Apple",
+  "F8:FF:C2": "Apple",
+  
+  "50:C7:BF": "TP-Link",
+  "C4:E9:84": "TP-Link",
+  "EC:08:6B": "TP-Link",
+  "F4:F2:6D": "TP-Link",
+  
+  "34:CE:00": "Xiaomi",
+  "50:8F:4C": "Xiaomi",
+  "68:DF:DD": "Xiaomi",
+  "8C:BE:BE": "Xiaomi",
+  "F8:59:71": "Xiaomi",
+  
+  "00:24:D4": "Samsung",
+  "08:EC:A9": "Samsung",
+  "3C:8B:FE": "Samsung",
+  "CC:07:AB": "Samsung",
+  "E8:5B:5B": "Samsung",
+  
+  "B4:0B:44": "ASUS",
+  "1C:B7:2C": "ASUS",
+  "2C:56:DC": "ASUS",
+  "AC:9E:17": "ASUS",
+  
+  "00:26:B0": "Netgear",
+  "28:C6:8E": "Netgear",
+  "A0:04:60": "Netgear",
+  "E0:46:9A": "Netgear",
+  
+  "00:16:B6": "Linksys",
+  "48:F8:B3": "Linksys",
+  "C4:41:1E": "Linksys",
+  
+  "D8:50:E6": "Amazon",
+  "FC:A6:67": "Amazon",
+  "F0:D2:F1": "Amazon",
+  
+  "18:B4:30": "Google",
+  "AA:8E:78": "Google",
+  "F4:F5:DB": "Google"
+}
