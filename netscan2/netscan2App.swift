@@ -1,15 +1,52 @@
 import SwiftUI
 import Network
 import SystemConfiguration
+import CoreWLAN
 
-// MARK: - Model
+// MARK: - Models
 
-struct Device: Identifiable, Hashable {
+struct WiFiNetwork: Identifiable, Codable, Hashable {
+    let id = UUID()
+    let ssid: String
+    var emoji: String
+    var devices: [String: Device] // MAC address -> Device
+    var lastSeen: Date
+    
+    init(ssid: String, emoji: String = "🛜") {
+        self.ssid = ssid
+        self.emoji = emoji
+        self.devices = [:]
+        self.lastSeen = Date()
+    }
+    
+    var deviceCount: Int {
+        devices.count
+    }
+}
+
+struct Device: Identifiable, Codable, Hashable {
     let id = UUID()
     let ip: String
     let mac: String?
     let hostname: String?
     var customIconPath: String? // PNG por MAC (se existir)
+    
+    // New fields for enhanced device management
+    var owner: String // Dono - editable by user
+    var brand: String // Marca - auto-filled via OUI, editable
+    var model: String // Modelo - editable by user
+    var lastSeen: Date
+    
+    init(ip: String, mac: String?, hostname: String?, customIconPath: String? = nil) {
+        self.ip = ip
+        self.mac = mac
+        self.hostname = hostname
+        self.customIconPath = customIconPath
+        self.owner = ""
+        self.brand = ""
+        self.model = ""
+        self.lastSeen = Date()
+    }
     
     var displayName: String {
         if let hn = hostname, !hn.isEmpty, hn != ip { return hn }
@@ -28,9 +65,251 @@ struct Device: Identifiable, Hashable {
         }
         return "🖥️"
     }
+    
+    // Update device with new scan data while preserving user fields
+    mutating func updateFromScan(ip: String, hostname: String?, customIconPath: String?, brand: String) {
+        // Update automatically detected fields only if they changed
+        if self.hostname != hostname {
+            // Hostname changed, update it  
+        }
+        if let newIconPath = customIconPath {
+            self.customIconPath = newIconPath
+        }
+        
+        // Auto-fill brand only if not manually set (empty) and we have a brand to set
+        if self.brand.isEmpty && !brand.isEmpty {
+            self.brand = brand
+        }
+        
+        self.lastSeen = Date()
+    }
 }
 
-// MARK: - Icon Manager (por MAC)
+// MARK: - OUI Manager (for Brand Detection)
+
+final class OUIManager {
+    static let shared = OUIManager()
+    
+    private init() {}
+    
+    // Common OUI prefixes for popular brands
+    private let commonOUIs: [String: String] = [
+        "00:1B:63": "Apple",
+        "00:1F:F3": "Apple", 
+        "00:25:00": "Apple",
+        "3C:15:C2": "Apple",
+        "AC:DE:48": "Apple",
+        "B8:E8:56": "Apple",
+        "DC:A6:32": "Apple",
+        "E4:CE:8F": "Apple",
+        "F0:18:98": "Apple",
+        "F4:0F:24": "Apple",
+        "F8:1E:DF": "Apple",
+        "F8:FF:C2": "Apple",
+        
+        "50:C7:BF": "TP-Link",
+        "C4:E9:84": "TP-Link",
+        "EC:08:6B": "TP-Link",
+        "F4:F2:6D": "TP-Link",
+        
+        "34:CE:00": "Xiaomi",
+        "50:8F:4C": "Xiaomi",
+        "68:DF:DD": "Xiaomi",
+        "8C:BE:BE": "Xiaomi",
+        "F8:59:71": "Xiaomi",
+        
+        "00:24:D4": "Samsung",
+        "08:EC:A9": "Samsung",
+        "3C:8B:FE": "Samsung",
+        "CC:07:AB": "Samsung",
+        "E8:5B:5B": "Samsung",
+        
+        "B4:0B:44": "ASUS",
+        "1C:B7:2C": "ASUS",
+        "2C:56:DC": "ASUS",
+        "AC:9E:17": "ASUS",
+        
+        "00:26:B0": "Netgear",
+        "28:C6:8E": "Netgear",
+        "A0:04:60": "Netgear",
+        "E0:46:9A": "Netgear",
+        
+        "00:16:B6": "Linksys",
+        "48:F8:B3": "Linksys",
+        "C4:41:1E": "Linksys",
+        
+        "D8:50:E6": "Amazon",
+        "FC:A6:67": "Amazon",
+        "F0:D2:F1": "Amazon",
+        
+        "18:B4:30": "Google",
+        "AA:8E:78": "Google",
+        "F4:F5:DB": "Google"
+    ]
+    
+    func getBrand(fromMAC mac: String) -> String {
+        let cleanMAC = mac.uppercased().replacingOccurrences(of: "-", with: ":")
+        
+        // Extract first 8 characters (first 3 octets) for OUI lookup
+        let oui = String(cleanMAC.prefix(8))
+        
+        if let brand = commonOUIs[oui] {
+            return brand
+        }
+        
+        // Try to load from user's oui.json file if it exists
+        if let userBrand = lookupUserOUI(oui: oui) {
+            return userBrand
+        }
+        
+        return ""
+    }
+    
+    private func lookupUserOUI(oui: String) -> String? {
+        // Try to load user-provided oui.json file
+        let fm = FileManager.default
+        let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let netScanDir = appSupportDir.appendingPathComponent("NetScan", isDirectory: true)
+        let ouiFile = netScanDir.appendingPathComponent("oui.json")
+        
+        guard let data = try? Data(contentsOf: ouiFile),
+              let ouiDict = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return nil
+        }
+        
+        return ouiDict[oui]
+    }
+}
+
+// MARK: - Network Manager (for Network Persistence)
+
+final class NetworkManager: ObservableObject {
+    static let shared = NetworkManager()
+    
+    @Published var networks: [WiFiNetwork] = []
+    @Published var selectedNetworkId: UUID?
+    
+    private let fm = FileManager.default
+    
+    private init() {
+        loadNetworks()
+    }
+    
+    private var appSupportDir: URL {
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("NetScan", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+    
+    private var networksURL: URL {
+        appSupportDir.appendingPathComponent("networks.json")
+    }
+    
+    private func loadNetworks() {
+        do {
+            let data = try Data(contentsOf: networksURL)
+            let networks = try JSONDecoder().decode([WiFiNetwork].self, from: data)
+            self.networks = networks
+        } catch {
+            // If loading fails, start with empty networks list
+            print("Failed to load networks: \(error.localizedDescription)")
+            self.networks = []
+        }
+    }
+    
+    private func saveNetworks() {
+        do {
+            let data = try JSONEncoder().encode(networks)
+            try data.write(to: networksURL, options: .atomic)
+        } catch {
+            print("Failed to save networks: \(error.localizedDescription)")
+        }
+    }
+    
+    func getCurrentSSID() -> String? {
+        // Get current Wi-Fi network SSID using CoreWLAN framework
+        do {
+            guard let wifiInterface = CWWiFiClient.shared().interface() else {
+                return nil
+            }
+            return wifiInterface.ssid()
+        } catch {
+            // If CoreWLAN fails, return a fallback name
+            return "Current Network"
+        }
+    }
+    
+    func addOrUpdateNetwork(ssid: String, devices: [Device]) {
+        if let index = networks.firstIndex(where: { $0.ssid == ssid }) {
+            // Update existing network
+            var network = networks[index]
+            
+            // Merge devices - existing devices keep user data, new devices get auto-detected data
+            for device in devices {
+                if let mac = device.mac {
+                    if let existingDevice = network.devices[mac] {
+                        // Update existing device while preserving user fields
+                        var updatedDevice = existingDevice
+                        updatedDevice.updateFromScan(
+                            ip: device.ip,
+                            hostname: device.hostname,
+                            customIconPath: device.customIconPath,
+                            brand: device.brand
+                        )
+                        network.devices[mac] = updatedDevice
+                    } else {
+                        // New device
+                        network.devices[mac] = device
+                    }
+                }
+            }
+            
+            network.lastSeen = Date()
+            networks[index] = network
+        } else {
+            // Create new network
+            var network = WiFiNetwork(ssid: ssid)
+            for device in devices {
+                if let mac = device.mac {
+                    network.devices[mac] = device
+                }
+            }
+            networks.append(network)
+        }
+        
+        saveNetworks()
+    }
+    
+    func updateNetworkEmoji(_ networkId: UUID, emoji: String) {
+        if let index = networks.firstIndex(where: { $0.id == networkId }) {
+            networks[index].emoji = emoji
+            saveNetworks()
+        }
+    }
+    
+    func updateDevice(_ device: Device, in networkId: UUID) {
+        guard let networkIndex = networks.firstIndex(where: { $0.id == networkId }),
+              let mac = device.mac else { return }
+        
+        networks[networkIndex].devices[mac] = device
+        saveNetworks()
+    }
+    
+    func getSelectedNetwork() -> WiFiNetwork? {
+        guard let selectedId = selectedNetworkId else { return nil }
+        return networks.first { $0.id == selectedId }
+    }
+    
+    func getDevicesForSelectedNetwork() -> [Device] {
+        guard let network = getSelectedNetwork() else { return [] }
+        return Array(network.devices.values).sorted { ipLess($0.ip, $1.ip) }
+    }
+}
+
+// MARK: - Icon Manager (for PNG icons by MAC)
 
 final class IconManager {
     static let shared = IconManager()
@@ -265,6 +544,9 @@ final class NetworkScanner: ObservableObject {
     @Published var progress: Double = 0
     @Published var status: String = "Pronto"
     
+    private let networkManager = NetworkManager.shared
+    private let ouiManager = OUIManager.shared
+    
     func startScan() {
         guard !isScanning else { return }
         isScanning = true
@@ -304,7 +586,11 @@ final class NetworkScanner: ObservableObject {
                             // DNS reverso
                             let hn = NetUtils.reverseDNS(ip: ip)
                             var dev = Device(ip: ip, mac: mac, hostname: hn, customIconPath: nil)
-                            if let mac = mac { dev.customIconPath = IconManager.shared.iconPath(forMAC: mac) }
+                            if let mac = mac { 
+                                dev.customIconPath = IconManager.shared.iconPath(forMAC: mac)
+                                // Auto-fill brand from MAC
+                                dev.brand = OUIManager.shared.getBrand(fromMAC: mac)
+                            }
                             return dev
                         }
                     }
@@ -330,12 +616,25 @@ final class NetworkScanner: ObservableObject {
                 let hn = NetUtils.reverseDNS(ip: ip)
                 var dev = Device(ip: ip, mac: mac, hostname: hn, customIconPath: nil)
                 dev.customIconPath = IconManager.shared.iconPath(forMAC: mac)
+                dev.brand = OUIManager.shared.getBrand(fromMAC: mac)
                 found.append(dev)
             }
             // Ordena por IP
             found.sort { ipLess($0.ip, $1.ip) }
+            
+            // Save to network persistence
+            await self.saveToNetwork(devices: found)
+            
             await self.applyResults(found)
             await self.finishScan(withStatus: "Concluído: \(found.count) dispositivos")
+        }
+    }
+    
+    private func saveToNetwork(devices: [Device]) async {
+        // Get current SSID and save devices to that network
+        let ssid = networkManager.getCurrentSSID() ?? "Unknown Network"
+        await MainActor.run {
+            networkManager.addOrUpdateNetwork(ssid: ssid, devices: devices)
         }
     }
     
@@ -384,34 +683,101 @@ func ipLess(_ a: String, _ b: String) -> Bool {
 
 struct ContentView: View {
     @StateObject private var scanner = NetworkScanner()
+    @StateObject private var networkManager = NetworkManager.shared
     @State private var query = ""
     @State private var showOnlyWithMAC = false
+    @State private var editingNetworkId: UUID? = nil
+    @State private var editingDeviceId: UUID? = nil
     
     var filtered: [Device] {
-        scanner.devices.filter { d in
-            let hay = "\(d.displayName) \(d.ip) \(d.mac ?? "")".lowercased()
+        let devices = networkManager.getDevicesForSelectedNetwork()
+        return devices.filter { d in
+            let hay = "\(d.displayName) \(d.ip) \(d.mac ?? "") \(d.owner) \(d.brand) \(d.model)".lowercased()
             let ok = query.isEmpty || hay.contains(query.lowercased())
             return ok && (!showOnlyWithMAC || d.mac != nil)
         }
     }
     
     var body: some View {
+        NavigationSplitView {
+            // Sidebar with networks
+            networksSidebar
+        } detail: {
+            // Main content with devices
+            if networkManager.selectedNetworkId != nil {
+                deviceListView
+                    .id(networkManager.selectedNetworkId) // Refresh when network changes
+            } else {
+                VStack {
+                    Text("Selecione uma rede")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                    Text("Escolha uma rede na barra lateral para ver os dispositivos")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(minWidth: 900, minHeight: 600)
+        .onAppear {
+            // Auto-select first network if available
+            if networkManager.selectedNetworkId == nil,
+               let firstNetwork = networkManager.networks.first {
+                networkManager.selectedNetworkId = firstNetwork.id
+            }
+        }
+    }
+    
+    private var networksSidebar: some View {
+        VStack(spacing: 0) {
+            // Sidebar header
+            HStack {
+                Text("Redes Wi-Fi")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    scanner.startScan()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(scanner.isScanning)
+            }
+            .padding()
+            
+            // Networks list
+            List(networkManager.networks, selection: $networkManager.selectedNetworkId) { network in
+                NetworkRow(network: network) { emoji in
+                    networkManager.updateNetworkEmoji(network.id, emoji: emoji)
+                }
+            }
+            .listStyle(.sidebar)
+            
+            if scanner.isScanning {
+                VStack(spacing: 4) {
+                    ProgressView(value: scanner.progress)
+                    Text(scanner.status)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+        }
+        .frame(minWidth: 200)
+    }
+    
+    private var deviceListView: some View {
         VStack(spacing: 0) {
             toolbar
-            progressBar
-            listView
+            devicesList
             footer
-        }
-        .frame(minWidth: 700, minHeight: 520)
-        .onAppear {
-            // opcional: auto-scan à entrada
-            // scanner.startScan()
         }
     }
     
     private var toolbar: some View {
         HStack {
-            TextField("Pesquisar por hostname/IP/MAC…", text: $query)
+            TextField("Pesquisar dispositivos…", text: $query)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
                 .frame(maxWidth: 320)
             Toggle("Só com MAC", isOn: $showOnlyWithMAC)
@@ -433,34 +799,34 @@ struct ContentView: View {
         .padding()
     }
     
-    private var progressBar: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if scanner.isScanning {
-                ProgressView(value: scanner.progress)
-            }
-            Text(scanner.status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal)
-        .padding(.bottom, 8)
-    }
-    
-    private var listView: some View {
+    private var devicesList: some View {
         List {
-            Section(header: headerRow) {
-                ForEach(filtered) { dev in
-                    DeviceRow(device: dev) { droppedURL in
-                        if let mac = dev.mac {
-                            IconManager.shared.setIcon(forMAC: mac, imageURL: droppedURL)
-                            refreshIcon(forMAC: mac)
+            Section(header: devicesHeaderRow) {
+                ForEach(filtered) { device in
+                    DeviceRow(
+                        device: device,
+                        isEditing: editingDeviceId == device.id,
+                        onEdit: { editingDeviceId = device.id },
+                        onSave: { updatedDevice in
+                            if let networkId = networkManager.selectedNetworkId {
+                                networkManager.updateDevice(updatedDevice, in: networkId)
+                            }
+                            editingDeviceId = nil
+                        },
+                        onCancel: { editingDeviceId = nil },
+                        onDropPNG: { droppedURL in
+                            if let mac = device.mac {
+                                IconManager.shared.setIcon(forMAC: mac, imageURL: droppedURL)
+                                refreshIcon(forMAC: mac)
+                            }
+                        },
+                        onClearIcon: {
+                            if let mac = device.mac {
+                                IconManager.shared.removeIcon(forMAC: mac)
+                                refreshIcon(forMAC: mac)
+                            }
                         }
-                    } onClearIcon: {
-                        if let mac = dev.mac {
-                            IconManager.shared.removeIcon(forMAC: mac)
-                            refreshIcon(forMAC: mac)
-                        }
-                    }
+                    )
                 }
             }
         }
@@ -475,20 +841,23 @@ struct ContentView: View {
                 Label("Exportar CSV", systemImage: "square.and.arrow.down")
             }
             Spacer()
-            Text("\(filtered.count) itens")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.trailing)
+            if let network = networkManager.getSelectedNetwork() {
+                Text("\(filtered.count) dispositivos em \(network.ssid)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding([.horizontal, .bottom])
     }
     
-    private var headerRow: some View {
-        HStack {
+    private var devicesHeaderRow: some View {
+        HStack(spacing: 12) {
             Text("Ícone").frame(width: 60, alignment: .leading)
-            Text("Hostname / IP")
-            Spacer()
-            Text("MAC").frame(width: 200, alignment: .leading)
+            Text("Hostname / IP").frame(width: 140, alignment: .leading)
+            Text("MAC").frame(width: 140, alignment: .leading)
+            Text("Dono").frame(width: 100, alignment: .leading)
+            Text("Marca").frame(width: 80, alignment: .leading)
+            Text("Modelo").frame(width: 100, alignment: .leading)
         }
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -496,17 +865,24 @@ struct ContentView: View {
     }
     
     private func refreshIcon(forMAC mac: String) {
-        // Atualiza a lista para refletir novo icon
-        for i in scanner.devices.indices {
-            if scanner.devices[i].mac?.uppercased() == mac.uppercased() {
-                scanner.devices[i].customIconPath = IconManager.shared.iconPath(forMAC: mac)
+        // Refresh the network manager to show updated icons
+        if let networkId = networkManager.selectedNetworkId,
+           let networkIndex = networkManager.networks.firstIndex(where: { $0.id == networkId }) {
+            for (deviceMAC, device) in networkManager.networks[networkIndex].devices {
+                if deviceMAC.uppercased() == mac.uppercased() {
+                    var updatedDevice = device
+                    updatedDevice.customIconPath = IconManager.shared.iconPath(forMAC: mac)
+                    networkManager.networks[networkIndex].devices[deviceMAC] = updatedDevice
+                }
             }
         }
     }
     
     private func exportCSV(devices: [Device]) {
-        let header = "ip,mac,hostname\n"
-        let rows = devices.map { "\"\($0.ip)\",\"\($0.mac ?? "")\",\"\($0.hostname ?? "")\"" }.joined(separator: "\n")
+        let header = "ip,mac,hostname,owner,brand,model\n"
+        let rows = devices.map { 
+            "\"\($0.ip)\",\"\($0.mac ?? "")\",\"\($0.hostname ?? "")\",\"\($0.owner)\",\"\($0.brand)\",\"\($0.model)\"" 
+        }.joined(separator: "\n")
         let csv = header + rows + "\n"
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.commaSeparatedText]
@@ -519,36 +895,156 @@ struct ContentView: View {
     }
 }
 
+struct NetworkRow: View {
+    let network: WiFiNetwork
+    var onEmojiUpdate: (String) -> Void
+    @State private var isEditingEmoji = false
+    @State private var newEmoji = ""
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            // Emoji button
+            Button {
+                newEmoji = network.emoji
+                isEditingEmoji = true
+            } label: {
+                Text(network.emoji)
+                    .font(.title2)
+            }
+            .buttonStyle(.plain)
+            .alert("Editar Emoji", isPresented: $isEditingEmoji) {
+                TextField("Emoji", text: $newEmoji)
+                Button("Cancelar", role: .cancel) { }
+                Button("Salvar") {
+                    if !newEmoji.isEmpty {
+                        onEmojiUpdate(newEmoji)
+                    }
+                }
+            } message: {
+                Text("Digite um emoji para esta rede")
+            }
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(network.ssid)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                Text("\(network.deviceCount) dispositivos")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            
+            Spacer()
+        }
+        .contentShape(Rectangle())
+    }
+}
+
 struct DeviceRow: View {
     let device: Device
+    let isEditing: Bool
+    var onEdit: () -> Void
+    var onSave: (Device) -> Void
+    var onCancel: () -> Void
     var onDropPNG: (URL) -> Void
     var onClearIcon: () -> Void
     
+    @State private var editedDevice: Device
+    
+    init(device: Device, isEditing: Bool, onEdit: @escaping () -> Void, onSave: @escaping (Device) -> Void, onCancel: @escaping () -> Void, onDropPNG: @escaping (URL) -> Void, onClearIcon: @escaping () -> Void) {
+        self.device = device
+        self.isEditing = isEditing
+        self.onEdit = onEdit
+        self.onSave = onSave
+        self.onCancel = onCancel
+        self.onDropPNG = onDropPNG
+        self.onClearIcon = onClearIcon
+        self._editedDevice = State(initialValue: device)
+    }
+    
     var body: some View {
         HStack(spacing: 12) {
+            // Icon
             iconView
                 .frame(width: 48, height: 48)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
-                .padding(.vertical, 4)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
             
+            // Hostname / IP
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.displayName)
-                    .font(.headline)
+                    .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                 Text(device.ip)
-                    .font(.subheadline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            .frame(width: 140, alignment: .leading)
+            
+            // MAC
             Text(device.mac ?? "–")
-                .font(.system(.body, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(device.mac == nil ? .secondary : .primary)
-                .frame(width: 200, alignment: .leading)
+                .frame(width: 140, alignment: .leading)
+            
+            // Owner (editable)
+            if isEditing {
+                TextField("Dono", text: $editedDevice.owner)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+            } else {
+                Text(device.owner.isEmpty ? "–" : device.owner)
+                    .font(.caption)
+                    .foregroundStyle(device.owner.isEmpty ? .secondary : .primary)
+                    .frame(width: 100, alignment: .leading)
+                    .onTapGesture { onEdit() }
+            }
+            
+            // Brand (editable)
+            if isEditing {
+                TextField("Marca", text: $editedDevice.brand)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 80)
+            } else {
+                Text(device.brand.isEmpty ? "–" : device.brand)
+                    .font(.caption)
+                    .foregroundStyle(device.brand.isEmpty ? .secondary : .primary)
+                    .frame(width: 80, alignment: .leading)
+                    .onTapGesture { onEdit() }
+            }
+            
+            // Model (editable)
+            if isEditing {
+                TextField("Modelo", text: $editedDevice.model)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 100)
+            } else {
+                Text(device.model.isEmpty ? "–" : device.model)
+                    .font(.caption)
+                    .foregroundStyle(device.model.isEmpty ? .secondary : .primary)
+                    .frame(width: 100, alignment: .leading)
+                    .onTapGesture { onEdit() }
+            }
+            
+            // Edit buttons
+            if isEditing {
+                HStack(spacing: 4) {
+                    Button("✓") {
+                        onSave(editedDevice)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.green)
+                    
+                    Button("✕") {
+                        editedDevice = device
+                        onCancel()
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red)
+                }
+            }
         }
         .contentShape(Rectangle())
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            // aceita PNG
             for prov in providers {
                 _ = prov.loadObject(ofClass: URL.self) { url, _ in
                     guard let url, url.pathExtension.lowercased() == "png" else { return }
@@ -558,8 +1054,16 @@ struct DeviceRow: View {
             return true
         }
         .contextMenu {
+            if !isEditing {
+                Button("Editar", action: onEdit)
+            }
             if device.mac != nil {
                 Button("Remover ícone personalizado", action: onClearIcon)
+            }
+        }
+        .onChange(of: device) { _, newDevice in
+            if !isEditing {
+                editedDevice = newDevice
             }
         }
     }
@@ -571,10 +1075,10 @@ struct DeviceRow: View {
             Image(nsImage: nsimg)
                 .resizable()
                 .scaledToFit()
-                .padding(6)
+                .padding(4)
         } else {
             Text(device.iconEmoji)
-                .font(.system(size: 28))
+                .font(.system(size: 24))
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
