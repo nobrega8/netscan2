@@ -184,29 +184,43 @@ enum NetUtils {
         return nil
     }
     
-    static func run(_ cmd: String, args: [String]) -> String? {
+    static func run(_ cmd: String, args: [String], timeout: TimeInterval? = nil) -> String? {
         let p = Process()
-        p.launchPath = cmd
+        p.executableURL = URL(fileURLWithPath: cmd)
         p.arguments = args
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        p.standardOutput = outPipe
+        p.standardError = errPipe
+        let sem = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in sem.signal() }
         do {
             try p.run()
         } catch {
             return nil
         }
-        p.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        if let timeout = timeout {
+            let deadline = DispatchTime.now() + timeout
+            if sem.wait(timeout: deadline) == .timedOut {
+                // excedeu o tempo limite — termina o processo
+                p.terminate()
+                _ = sem.wait(timeout: .now() + 1)
+            }
+        } else {
+            p.waitUntilExit()
+        }
+        let data = outPipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)
     }
     
-    static func ping(ip: String, timeoutSeconds: Double = 1.0) -> Bool {
-        // macOS ping: -c 1 (uma tentativa), -t TTL (não é timeout mas mantém rápido)
-        // Vamos limitar com um watchdog assíncrono em TaskGroup; se bloquear, descartamos.
-        let result = run("/sbin/ping", args: ["-c","1","-t","64", ip])
-        // Considera vivo se houver "1 packets received"
-        return result?.contains("1 packets received") == true || result?.contains("1 packets transmitted, 1 packets received") == true
+    static func ping(ip: String, timeoutSeconds: Double = 0.7) -> Bool {
+        // macOS ping: -c 1 (uma tentativa), -W (timeout em ms por pacote), -n (não faz DNS), -q (quiet)
+        // Além disso, aplicamos um timeout externo ao processo (fallback) via `run(timeout:)`.
+        let waitMS = max(100, Int(timeoutSeconds * 1000))
+        let result = run("/sbin/ping", args: ["-c","1","-W","\(waitMS)","-n","-q", ip], timeout: timeoutSeconds + 0.2)
+        guard let result else { return false }
+        // Considera vivo se houver "1 packets received" ou "1 packets transmitted, 1 received"
+        return result.contains("1 packets received") || result.contains("1 packets transmitted, 1 packets received") || result.contains("1 received")
     }
     
     static func arpFor(ip: String) -> String? {
@@ -221,6 +235,24 @@ enum NetUtils {
             }
         }
         return nil
+    }
+
+    static func arpAll() -> [(ip: String, mac: String)] {
+        guard let out = run("/usr/sbin/arp", args: ["-an"]) else { return [] }
+        var results: [(String, String)] = []
+        // Linhas típicas: ? (192.168.1.10) at a1:b2:c3:d4:e5:f6 on en0 ifscope [ethernet]
+        for line in out.split(separator: "\n") {
+            guard let open = line.firstIndex(of: "("),
+                  let close = line.firstIndex(of: ")"),
+                  let atRange = line.range(of: " at ") else { continue }
+            let ip = String(line[line.index(after: open)..<close])
+            let tail = line[atRange.upperBound...]
+            let mac = tail.split(separator: " ").first.map(String.init) ?? ""
+            if mac != "(incomplete)" && !mac.isEmpty {
+                results.append((ip, mac))
+            }
+        }
+        return results
     }
 }
 
@@ -286,6 +318,19 @@ final class NetworkScanner: ObservableObject {
                     await self.updateProgress(Double(processed) / Double(max(1,total)))
                     enqueueNext(1) // mantém pipeline
                 }
+            }
+            // Fallback: incluir entradas conhecidas na ARP table (mesmo que não tenham respondido a ping)
+            let arpEntries = NetUtils.arpAll()
+            let presentIPs = Set(found.map { $0.ip })
+            // Restringe a mesma sub-rede do scan
+            let subnetCIDR = (NetUtils.cidrFromNetmask(iface.netmask) >= 24 && NetUtils.cidrFromNetmask(iface.netmask) <= 30) ? NetUtils.cidrFromNetmask(iface.netmask) : 24
+            let subnetIPs = Set(NetUtils.hostsInSubnet(ip: iface.ip, cidr: subnetCIDR))
+            for (ip, mac) in arpEntries {
+                guard !presentIPs.contains(ip), subnetIPs.contains(ip) else { continue }
+                let hn = NetUtils.reverseDNS(ip: ip)
+                var dev = Device(ip: ip, mac: mac, hostname: hn, customIconPath: nil)
+                dev.customIconPath = IconManager.shared.iconPath(forMAC: mac)
+                found.append(dev)
             }
             // Ordena por IP
             found.sort { ipLess($0.ip, $1.ip) }
